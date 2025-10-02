@@ -1,48 +1,136 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from flask_restful import Resource, Api
-from datetime import datetime
+from datetime import datetime, timedelta
+import jwt
 
+# Khởi tạo ứng dụng
 app = Flask(__name__)
 api = Api(app)
 
+app.config['SECRET_KEY'] = 'super_secret_key_for_library_api'
+
+# Dữ liệu Giả định (Mô phỏng Database)
 BOOKS = {
-    1: {"title": "Lập trình Python cơ bản", "author": "Nguyễn Văn C", "status": "available"},
-    2: {"title": "Kiến trúc REST API", "author": "Trần Thị D", "status": "available"},
-    3: {"title": "Lịch sử Việt Nam", "author": "Phạm Văn E", "status": "on loan"}
+    1: {"title": "Lập trình Python cơ bản", "author": "Nguyễn Văn C"},
+    2: {"title": "Kiến trúc REST API", "author": "Trần Thị D"},
+    3: {"title": "Lịch sử Việt Nam", "author": "Phạm Văn E"}
 }
 next_book_id = 4
-next_loan_id = 1
-LOANS = {}
 
-# --- QUẢN LÝ SÁCH ---
+# Dữ liệu tài khoản giả định (username: password)
+USERS = {
+    "admin": {"password": "adminpass", "role": "admin"},
+    "member": {"password": "memberpass", "role": "member"}
+}
+
+# --- HÀM HỖ TRỢ XÁC THỰC ---
+
+def jwt_required(f):
+    """Decorator kiểm tra JWT và vai trò (role) của người dùng."""
+    def wrapper(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        
+        if not token or not token.startswith('Bearer '):
+            # 401 Unauthorized - Thiếu Token hoặc sai định dạng
+            return {"message": "Unauthorized: Yêu cầu JWT Token trong Header Authorization (Bearer <token>)."}, 401
+        
+        token = token.split(' ')[1]
+        
+        try:
+            # Giải mã Token và lấy payload
+            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+            # Gán dữ liệu người dùng vào request context (Flask-g) nếu cần
+            request.user_role = data.get('role') 
+            
+        except jwt.ExpiredSignatureError:
+            return {"message": "Unauthorized: Token đã hết hạn."}, 401
+        except jwt.InvalidTokenError:
+            return {"message": "Unauthorized: Token không hợp lệ."}, 401
+        
+        return f(*args, **kwargs)
+    return wrapper
+
+def admin_required(f):
+    """Decorator kiểm tra quyền Admin sau khi JWT đã được xác thực."""
+    def wrapper(*args, **kwargs):
+        # Kiểm tra vai trò (role) đã được gán vào request.user_role bởi jwt_required
+        if not hasattr(request, 'user_role') or request.user_role != 'admin':
+            # 403 Forbidden - Token hợp lệ nhưng không đủ quyền hạn
+            return {"message": "Forbidden: Chỉ Admin mới có quyền thực hiện thao tác này."}, 403
+        return f(*args, **kwargs)
+    return wrapper
+
+# --- TÀI NGUYÊN: XÁC THỰC (Authentication Resource) ---
+
+class Login(Resource):
+    """POST /api/auth/login để lấy JWT Token."""
+    def post(self):
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+        
+        user_info = USERS.get(username)
+        
+        if user_info and user_info['password'] == password:
+            # Tạo payload cho JWT (chứa thông tin user và role)
+            payload = {
+                'username': username,
+                'role': user_info['role'],
+                # Đặt thời gian hết hạn (ví dụ: 30 phút)
+                'exp': datetime.utcnow() + timedelta(minutes=30),
+                'iat': datetime.utcnow()
+            }
+            
+            # Mã hóa Token
+            token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm="HS256")
+            
+            # Trả về 200 OK với Token
+            return jsonify({
+                "message": "Đăng nhập thành công",
+                "token": token,
+                "token_type": "Bearer"
+            }), 200
+        
+        # 401 Unauthorized - Sai tên đăng nhập hoặc mật khẩu
+        return {"message": "Sai tên đăng nhập hoặc mật khẩu."}, 401
+
+# --- TÀI NGUYÊN: SÁCH (Resource: Book) ---
 
 class BookList(Resource):
+    # GET /api/books (Công khai)
     def get(self):
         return BOOKS, 200
 
+class Book(Resource):
+    # GET /api/books/<id> (Công khai)
+    def get(self, book_id):
+        if book_id not in BOOKS:
+            return {"message": f"Không tìm thấy sách với ID {book_id}."}, 404
+        return BOOKS[book_id], 200
+    
+        # POST /api/books (Yêu cầu JWT nhưng không nhất thiết phải là Admin)
+    @jwt_required
     def post(self):
         global next_book_id
-        data = request.get_json()
         
+        data = request.get_json()
         if not data or 'title' not in data or 'author' not in data:
-            return {"message": "Thiếu tiêu đề hoặc tác giả."}, 400
+            return {"message": "Thiếu 'title' hoặc 'author' trong payload."}, 400
             
-        new_book = {"title": data['title'], "author": data['author'], "status": "available"}
+        new_book = {"title": data['title'], "author": data['author']}
         BOOKS[next_book_id] = new_book
         new_book_id = next_book_id
         next_book_id += 1
         
         return {"message": "Thêm sách thành công", "book_id": new_book_id, "book": new_book}, 201
 
-class Book(Resource):
-    def get(self, book_id):
-        if book_id not in BOOKS:
-            return {"message": "Không tìm thấy sách."}, 404
-        return BOOKS[book_id], 200
-
+    # PUT /api/books/<id> (Yêu cầu JWT VÀ là Admin)
+    @jwt_required
+    @admin_required
     def put(self, book_id):
+        
         if book_id not in BOOKS:
-            return {"message": "Không tìm thấy sách."}, 404
+            return {"message": f"Không tìm thấy sách với ID {book_id}."}, 404
             
         data = request.get_json()
         if 'title' in data: BOOKS[book_id]['title'] = data['title']
@@ -50,81 +138,21 @@ class Book(Resource):
             
         return {"message": "Cập nhật sách thành công", "book": BOOKS[book_id]}, 200
 
+    # DELETE /api/books/<id> (Yêu cầu JWT VÀ là Admin)
+    @jwt_required
+    @admin_required
     def delete(self, book_id):
+        
         if book_id not in BOOKS:
-            return {"message": "Không tìm thấy sách."}, 404
+            return {"message": f"Không tìm thấy sách với ID {book_id}."}, 404
         
         del BOOKS[book_id]
         return {"message": "Xóa sách thành công"}, 204
 
-# --- MƯỢN/TRẢ SÁCH ---
-
-class LoanManagement(Resource):
-    def get(self):
-        return LOANS, 200
-
-    def post(self):
-        global next_loan_id
-        data = request.get_json()
-        book_id = data.get('book_id')
-        member_id = data.get('member_id')
-
-        if not book_id or not member_id:
-            return {"message": "Thiếu book_id hoặc member_id."}, 400
-
-        try:
-            book_id = int(book_id)
-        except ValueError:
-            return {"message": "book_id không hợp lệ."}, 400
-
-        if book_id not in BOOKS:
-            return {"message": "Sách không tồn tại."}, 404
-        
-        if BOOKS[book_id]['status'] != 'available':
-            return {"message": "Sách đang được mượn."}, 409
-
-        BOOKS[book_id]['status'] = 'on loan'
-        
-        new_loan = {
-            "book_id": book_id,
-            "member_id": member_id,
-            "loan_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "return_date": None
-        }
-        LOANS[next_loan_id] = new_loan
-        new_loan_id = next_loan_id
-        next_loan_id += 1
-        
-        return {"message": "Mượn sách thành công", "loan_id": new_loan_id, "loan": new_loan}, 201
-
-class LoanReturn(Resource):
-    def put(self, loan_id):
-        try:
-            loan_id = int(loan_id)
-        except ValueError:
-             return {"message": "loan_id không hợp lệ."}, 400
-
-        if loan_id not in LOANS:
-            return {"message": "Không tìm thấy giao dịch mượn."}, 404
-            
-        loan = LOANS[loan_id]
-
-        if loan['return_date'] is not None:
-            return {"message": "Sách đã được trả."}, 409
-
-        loan['return_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        book_id = loan['book_id']
-        if book_id in BOOKS:
-            BOOKS[book_id]['status'] = 'available'
-        
-        return {"message": "Trả sách thành công", "loan": loan}, 200
-
 # --- ĐỊNH NGHĨA ENDPOINT ---
+api.add_resource(Login, '/api/auth/login')
 api.add_resource(BookList, '/api/books')
 api.add_resource(Book, '/api/books/<int:book_id>')
-api.add_resource(LoanManagement, '/api/loans')
-api.add_resource(LoanReturn, '/api/loans/<loan_id>/return')
 
 if __name__ == '__main__':
     app.run(debug=True)

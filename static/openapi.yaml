@@ -1,0 +1,378 @@
+openapi: 3.0.0
+info:
+  title: Library API - Full Specification
+  version: 1.0.0
+  description: API Thư viện sách, bao gồm phân trang, Reviews và bảo mật JWT.
+
+servers:
+  - url: http://127.0.0.1:5000 
+
+paths:
+  /api/auth/login:
+    post:
+      summary: Đăng nhập và nhận JWT Token
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginInput'
+      responses:
+        '200':
+          description: Đăng nhập thành công, trả về JWT Token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        default:
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/books:
+    get:
+      summary: Lấy danh sách sách có phân trang Offset/Limit
+      tags:
+        - Books
+      parameters:
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Danh sách sách được phân trang, trả về cùng metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedBookList'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        default:
+          $ref: '#/components/responses/InternalServerError'
+          
+    post: 
+      summary: Thêm sách mới (Yêu cầu Admin)
+      tags:
+        - Books
+      security:
+        - BearerAuth: [] # Áp dụng: Yêu cầu JWT Token (từ @jwt_required)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookInput'
+      responses:
+        '201':
+          description: Sách được tạo thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+         
+
+  /api/books/{book_id}:
+    parameters:
+      - $ref: '#/components/parameters/BookIdParam'
+      
+    get:
+      summary: Lấy chi tiết sách theo ID
+      tags:
+        - Books
+      responses:
+        '200':
+          description: Thông tin chi tiết của sách.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        default:
+          $ref: '#/components/responses/InternalServerError'
+          
+    put:
+      summary: Cập nhật sách (Yêu cầu Admin)
+      tags:
+        - Books
+      security:
+        - BearerAuth: [] # Áp dụng: Yêu cầu JWT Token (từ @jwt_required)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookInput' 
+      responses:
+        '200':
+          description: Cập nhật sách thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError' # Thêm 403 cho kiểm tra Admin
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+          
+    delete:
+      summary: Xóa sách (Yêu cầu Admin)
+      tags:
+        - Books
+      security:
+        - BearerAuth: [] # Áp dụng: Yêu cầu JWT Token (từ @jwt_required)
+      responses:
+        '204':
+          description: Xóa sách thành công (Không trả về nội dung).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError' # Thêm 403 cho kiểm tra Admin
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /api/books/{book_id}/reviews:
+    parameters:
+      - $ref: '#/components/parameters/BookIdParam'
+      
+    get:
+      summary: Lấy danh sách nhận xét của một cuốn sách (có phân trang)
+      tags:
+        - Reviews
+      parameters:
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Danh sách nhận xét được phân trang.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PagedReviewList'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+          
+    post:
+      summary: Thêm nhận xét mới cho sách (Yêu cầu Đăng nhập)
+      tags:
+        - Reviews
+      security:
+        - BearerAuth: [] # Áp dụng: Yêu cầu JWT Token (từ @jwt_required)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewInput'
+      responses:
+        '201':
+          description: Nhận xét được tạo thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /api/books/code/reading-time:
+    get:
+      summary: Cung cấp mã JavaScript tính thời gian đọc (Code-On-Demand)
+      tags:
+        - Utility
+      responses:
+        '200':
+          description: Trả về mã JavaScript để client thực thi.
+          content:
+            application/javascript:
+              schema:
+                type: string
+                format: binary 
+                example: "function calculateReadingTime(wordCount) { /* ... */ }"
+        default:
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  
+  ## --- PARAMETERS (Tái sử dụng) ---
+  parameters:
+    BookIdParam:
+      name: book_id
+      in: path
+      required: true
+      description: ID của sách
+      schema:
+        type: integer
+    OffsetParam:
+      name: offset
+      in: query
+      required: false
+      description: Vị trí bắt đầu của danh sách (số lượng bản ghi bỏ qua). Mặc định 0.
+      schema:
+        type: integer
+        default: 0
+        minimum: 0
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      description: Số lượng bản ghi tối đa được trả về. Mặc định 10.
+      schema:
+        type: integer
+        default: 10
+        minimum: 1
+        maximum: 100
+
+  ## --- SCHEMAS (Mô hình Dữ liệu) ---
+  schemas:
+    
+    # 1. AUTH SCHEMAS
+    LoginInput:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string}
+        password: {type: string}
+    AuthResponse:
+      type: object
+      properties:
+        message: {type: string}
+        token: {type: string}
+        token_type: {type: string}
+        
+    # 2. CORE BOOK SCHEMAS
+    Book:
+      type: object
+      properties:
+        title: {type: string}
+        author: {type: string}
+          
+    BookInput:  
+      type: object
+      required: [title, author]
+      properties:
+        title: {type: string}
+        author: {type: string}
+          
+    BookResponse:  
+      type: object
+      properties:
+        message: {type: string}
+        book_id: {type: integer}
+        book:
+          $ref: '#/components/schemas/Book'
+
+    # 3. REVIEW SCHEMAS
+    Review:
+      type: object
+      properties:
+        book_id: {type: integer, description: ID của sách được đánh giá}
+        user: {type: string, description: Vai trò người dùng đã đánh giá}
+        rating: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: string}
+    
+    ReviewInput:
+      type: object
+      required: [rating]
+      properties:
+        rating: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: string}
+        
+    ReviewResponse:
+      type: object
+      properties:
+        message: {type: string}
+        review_id: {type: integer}
+        review:
+          $ref: '#/components/schemas/Review'
+
+    # 4. PAGINATION SCHEMAS
+    PaginationMetadata:
+      type: object
+      description: Metadata về trạng thái phân trang.
+      properties:
+        total_count: {type: integer}
+        current_items: {type: integer}
+        offset: {type: integer}
+        limit: {type: integer}
+        next_offset: {type: integer, nullable: true}
+          
+    PagedBookList:
+      type: object
+      description: Cấu trúc phản hồi cho danh sách sách có phân trang.
+      properties:
+        data:
+          type: object
+          description: Tập hợp các đối tượng sách (key là ID sách).
+          additionalProperties:
+            $ref: '#/components/schemas/Book'
+        pagination:
+          $ref: '#/components/schemas/PaginationMetadata'
+          
+    PagedReviewList:
+      type: object
+      description: Cấu trúc phản hồi cho danh sách nhận xét có phân trang.
+      properties:
+        data:
+          type: object
+          description: Tập hợp các đối tượng nhận xét (key là ID nhận xét).
+          additionalProperties:
+            $ref: '#/components/schemas/Review'
+        pagination:
+          $ref: '#/components/schemas/PaginationMetadata'
+    
+    # 5. ERROR SCHEMAS
+    Error:
+      type: object
+      properties:
+        message: {type: string}
+
+  ## --- RESPONSES (Tái sử dụng) ---
+  responses:
+    BadRequestError:
+      description: Lỗi dữ liệu đầu vào.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFoundError:
+      description: Không tìm thấy tài nguyên.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnauthorizedError:
+      description: Lỗi xác thực (Thiếu/Sai/Hết hạn Token).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ForbiddenError:
+      description: Lỗi cấp quyền.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalServerError:
+      description: Lỗi máy chủ không xác định.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+            
+  ## --- SECURITY SCHEMES ---
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

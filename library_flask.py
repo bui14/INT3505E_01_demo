@@ -185,59 +185,86 @@ class Login(Resource):
 
             token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm="HS256")
 
-            return jsonify({
+            return {
                 "message": "Đăng nhập thành công",
                 "token": token,
                 "token_type": "Bearer"
-            }), 200
+            }, 200
 
         return {"message": "Sai tên đăng nhập hoặc mật khẩu."}, 401
 
 class BookList(Resource):
     def get(self):
         try:
-            # offset: Bắt đầu từ bản ghi thứ bao nhiêu (mặc định 0)
-            # limit: Số lượng bản ghi tối đa trên một trang (mặc định 10)
             offset = int(request.args.get('offset', 0))
             limit = int(request.args.get('limit', 10))
         except ValueError:
             return {"message": "Offset và Limit phải là số nguyên."}, 400
 
-        # Kiểm tra giới hạn (tùy chọn)
         if limit < 1 or limit > 100:
             return {"message": "Limit phải nằm trong khoảng 1 đến 100."}, 400
 
-        # 2. Xử lý logic phân trang
-        book_ids = sorted(BOOKS.keys()) # Sắp xếp ID để đảm bảo thứ tự
-        total_count = len(BOOKS)
+        # 1. THÊM LOGIC TÌM KIẾM
+        search_query = request.args.get('q', '').lower() 
         
-        # Áp dụng OFFSET và LIMIT bằng slicing của Python
+        filtered_book_ids = []
+        
+        # Lọc sách: kiểm tra query có trong title HOẶC author không
+        for id, book in BOOKS.items():
+            if not search_query or search_query in book['title'].lower() or search_query in book['author'].lower():
+                filtered_book_ids.append(id)
+        
+        # 2. ÁP DỤNG PHÂN TRANG TRÊN KẾT QUẢ ĐÃ LỌC
+        book_ids = sorted(filtered_book_ids)
+        total_count = len(book_ids)
+        
         paged_ids = book_ids[offset : offset + limit]
+        paged_books = {id: BOOKS[id] for id in paged_ids}
         
-        # Lấy dữ liệu sách cho trang hiện tại
-        paged_books = {
-            id: BOOKS[id] 
-            for id in paged_ids
-        }
-        
-        # 3. Tạo Metadata Phân trang (Rất quan trọng cho Client)
         metadata = {
             "total_count": total_count,
             "current_items": len(paged_ids),
             "offset": offset,
             "limit": limit,
-            # Link/Offset cho trang tiếp theo (chỉ khi còn sách)
             "next_offset": offset + limit if offset + limit < total_count else None
         }
+        
+        # 3. CẬP NHẬT HATEOAS LINKS để bao gồm tham số 'q'
+        base_url = f"{request.url_root.rstrip('/')}/api/books" 
+        
+        # Chuẩn bị tham số query string (bao gồm 'q' nếu có)
+        query_params = f"q={search_query}&" if search_query else ""
+        
+        links = {
+            # Link Self phải bao gồm 'q'
+            "self": f"{base_url}?{query_params}offset={offset}&limit={limit}",
+            "first": f"{base_url}?{query_params}offset=0&limit={limit}",
+        }
+        
+        # Tính toán offset cuối cùng
+        last_offset = total_count - (total_count % limit or limit)
+        links["last"] = f"{base_url}?{query_params}offset={last_offset if last_offset > 0 else 0}&limit={limit}" if total_count > 0 else f"{base_url}?{query_params}offset=0&limit={limit}"
+        
+        if metadata["next_offset"] is not None:
 
-        # 4. Tạo phản hồi JSON chuẩn (bao gồm data và pagination)
-        response_data = jsonify({"data": paged_books, "pagination": metadata})
+            links["next"] = f"{base_url}?{query_params}offset={metadata['next_offset']}&limit={limit}"
+        if offset > 0:
+            prev_offset = max(0, offset - limit)
+
+            links["prev"] = f"{base_url}?{query_params}offset={prev_offset}&limit={limit}"
+
+        response_data = jsonify({
+            "data": paged_books, 
+            "pagination": metadata,
+            "_links": links,
+            "actions": { 
+                "create_book": {"method": "POST", "href": base_url, "schema_ref": "/api/docs#/components/schemas/BookInput"}
+            }
+        })
         res = make_response(response_data)
-
-        #Cache - control
         res.headers.set('Cache-Control', 'public, max-age=60') 
         return res
-    
+        
     @jwt_required 
     def post(self):
         global next_book_id
@@ -250,20 +277,50 @@ class BookList(Resource):
         BOOKS[next_book_id] = new_book
         new_book_id = next_book_id
         next_book_id += 1
-
-        return {"message": "Thêm sách thành công", "book_id": new_book_id, "book": new_book}, 201
+        
+        # --- HATEOAS LINKS (Liên kết tới tài nguyên mới) ---
+        book_url = f"{request.url_root.rstrip('/')}/api/books/{new_book_id}"
+        
+        return {
+            "message": "Thêm sách thành công", 
+            "book_id": new_book_id, 
+            "book": new_book,
+            "_links": {
+                "self": book_url,
+                "edit": book_url,
+                "delete": book_url,
+                "reviews": f"{request.url_root.rstrip('/')}/api/books/{new_book_id}/reviews"
+            }
+        }, 201
 
 class Book(Resource):
+    # GET /api/books/{book_id} (HATEOAS)
     def get(self, book_id):
         if book_id not in BOOKS:
             return {"message": f"Không tìm thấy sách với ID {book_id}."}, 404
 
-        response_data = jsonify(BOOKS[book_id])
+        book_data = BOOKS[book_id]
+        book_url = f"{request.url_root.rstrip('/')}/api/books/{book_id}"
 
+        # --- HATEOAS LINKS ---
+        links = {
+            "self": book_url,
+            "reviews": f"{request.url_root.rstrip('/')}/api/books/{book_id}/reviews",
+            "edit": book_url,
+            "delete": book_url
+        }
+
+        response_data = jsonify({
+            **book_data, 
+            "_links": links,
+            "actions": {
+                # Cung cấp hướng dẫn cho client về các hành động tiếp theo
+                "update_book": {"method": "PUT", "href": links['edit'], "schema_ref": "/api/docs#/components/schemas/BookInput"},
+                "delete_book": {"method": "DELETE", "href": links['delete']}
+            }
+        })
         res = make_response(response_data)
-
         res.headers.set('Cache-Control', 'public, max-age=60')
-        
         return res
 
     @jwt_required

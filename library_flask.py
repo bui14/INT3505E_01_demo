@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, Blueprint
 from flask_restful import Resource, Api
 from datetime import datetime, timedelta
 import jwt
@@ -11,6 +11,8 @@ app = Flask(__name__)
 api = Api(app)
 
 app.config['SECRET_KEY'] = 'super_secret_key_for_library_api'
+
+api_v1_bp = Blueprint('api_v1', __name__, url_prefix='/api/v1')
 
 BOOKS = {
     1: {"title": "Lập trình Python cơ bản", "author": "Nguyễn Văn C"},
@@ -360,15 +362,16 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 )
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 
-api.add_resource(Login, '/api/auth/login')
-api.add_resource(BookList, '/api/books')
-api.add_resource(Book, '/api/books/<int:book_id>')
-api.add_resource(ReadingTimeCode, '/api/books/code/reading-time')
-api.add_resource(ReviewList, '/api/books/<int:book_id>/reviews')
+api.add_resource(Login, '/auth/login')
+api.add_resource(BookList, '/books')
+api.add_resource(Book, '/books/<int:book_id>')
+api.add_resource(ReadingTimeCode, '/books/code/reading-time')
+api.add_resource(ReviewList, '/books/<int:book_id>/reviews')
 
 if __name__ == '__main__':
     print("-" * 50)
     print(f"Ứng dụng Flask đang chạy...")
+    print(f"API V1 có sẵn tại: http://127.0.0.1:5000/api/v1/...")
     print(f"Swagger UI có sẵn tại: http://127.0.0.1:5000{SWAGGER_URL}")
     print("-" * 50)
     app.run(debug=True)

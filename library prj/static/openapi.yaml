@@ -8,7 +8,7 @@ servers:
   - url: http://127.0.0.1:5000 
 
 paths:
-  /auth/login:
+  /api/v1/auth/login:
     post:
       summary: Đăng nhập và nhận JWT Token
       tags:
@@ -31,7 +31,7 @@ paths:
         default:
           $ref: '#/components/responses/InternalServerError'
 
-  /books:
+  /api/v1/books:
     get:
       summary: Lấy danh sách sách có phân trang Offset/Limit
       tags:
@@ -76,7 +76,7 @@ paths:
           $ref: '#/components/responses/UnauthorizedError'
          
 
-  /books/{book_id}:
+  /api/v1/books/{book_id}:
     parameters:
       - $ref: '#/components/parameters/BookIdParam'
       
@@ -138,7 +138,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
 
-  /books/{book_id}/reviews:
+  /api/v1/books/{book_id}/reviews:
     parameters:
       - $ref: '#/components/parameters/BookIdParam'
       
@@ -185,7 +185,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
 
-  /books/code/reading-time:
+  /api/v1/books/code/reading-time:
     get:
       summary: Cung cấp mã JavaScript tính thời gian đọc (Code-On-Demand)
       tags:

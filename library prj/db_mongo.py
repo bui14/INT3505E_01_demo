@@ -39,9 +39,13 @@ def connect_to_mongo():
     return db
 
 def get_db():
-    """Trả về đối tượng database đã kết nối."""
+    """Trả về database đang kết nối, tự động đảm bảo đúng tên."""
+    global db
     if db is None:
         connect_to_mongo()
+    if db is not None and db.name != DATABASE_NAME:
+        print(f"⚠️ Database name mismatch (expected '{DATABASE_NAME}', got '{db.name}') → switching...")
+        db = mongo_client[DATABASE_NAME]
     return db
 
 def close_mongo_connection():

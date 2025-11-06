@@ -1,18 +1,13 @@
-# routes_v1.py
-
 from flask import request, jsonify, make_response, Blueprint, current_app
 from flask_restful import Api, Resource
-from datetime import datetime, timedelta, timezone # Thêm timezone
+from datetime import datetime, timedelta, timezone
 import jwt
 import functools 
-from bson import ObjectId # Import ObjectId for querying
-from pydantic_core import ValidationError # Import ValidationError
-# Import get_db và Schemas từ db_mongo.py
+from bson import ObjectId 
+from pydantic_core import ValidationError 
 from db_mongo import get_db, UserSchema, BookSchema, ReviewSchema 
-# Import password hashing if needed (assuming User password needs hashing/checking)
 from werkzeug.security import check_password_hash, generate_password_hash
 
-# --- CREATE BLUEPRINT and API for V1 ---
 v1_bp = Blueprint('api_v1', __name__, url_prefix='/api/v1')
 api_v1 = Api(v1_bp) # Attach Flask-RESTful Api to the Blueprint
 
@@ -45,7 +40,7 @@ def admin_required(f):
 class LoginV1(Resource):
     def post(self):
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         
         data = request.get_json()
         username = data.get('username')
@@ -72,7 +67,7 @@ class LoginV1(Resource):
 class BookListV1(Resource):
     def get(self):
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         
         try:
             offset = int(request.args.get('offset', 0))
@@ -117,7 +112,7 @@ class BookListV1(Resource):
     @jwt_required
     def post(self):
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         
         data = request.get_json();
         if not data: return {"message": "Không có dữ liệu JSON trong body."}, 400
@@ -153,7 +148,7 @@ class BookListV1(Resource):
 class BookV1(Resource):
     def get(self, book_id_str):
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         
         try:
             book_oid = ObjectId(book_id_str)
@@ -176,7 +171,7 @@ class BookV1(Resource):
     @admin_required
     def put(self, book_id_str):
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         
         try:
             book_oid = ObjectId(book_id_str)
@@ -213,7 +208,7 @@ class BookV1(Resource):
     @admin_required
     def delete(self, book_id_str):
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         
         try:
             book_oid = ObjectId(book_id_str)
@@ -236,7 +231,7 @@ class ReviewListV1(Resource):
     # GET /api/v1/books/{book_id}/reviews (N+1 Avoidance)
     def get(self, book_id_str): 
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         try:
             book_oid = ObjectId(book_id_str)
         except Exception: return {"message": "Invalid Book ID format."}, 400
@@ -290,7 +285,7 @@ class ReviewListV1(Resource):
     @jwt_required
     def post(self, book_id_str): 
         db = get_db()
-        if not db: return {"message": "Database connection failed."}, 500
+        if db is None: return {"message": "Database connection failed."}, 500
         try:
             book_oid = ObjectId(book_id_str)
         except Exception: return {"message": "Invalid Book ID format."}, 400

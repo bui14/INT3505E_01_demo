@@ -1,50 +1,70 @@
-# v2/routes.py
 from flask import Blueprint, jsonify, request
+import pybreaker
+from extensions import limiter  # 1. Import Limiter
+from services.bank_service import bank_service # 2. Import Service có Circuit Breaker
 
 v2_bp = Blueprint('v2', __name__, url_prefix='/v2')
 
 @v2_bp.route('/payment-intents', methods=['POST'])
+# --- RATE LIMITING: Demo Window Time (3 request / 10 giây) ---
+@limiter.limit("3 per 10 seconds") 
 def create_payment_intent():
-    data = request.get_json()
-    amount = data.get('amount')
-    currency = data.get('currency', 'usd')
-    payment_method = data.get('payment_method') # Lấy ID thẻ/ví (VD: pm_card_visa)
-    return_url = data.get('return_url')         # URL để quay về sau khi xác thực xong
+    # Bọc toàn bộ logic vào try/except để bắt lỗi Circuit Breaker
+    try:
+        data = request.get_json() or {}
+        amount = data.get('amount')
+        currency = data.get('currency', 'usd')
+        payment_method = data.get('payment_method')
+        return_url = data.get('return_url')
 
-    print(f"[v2] Creating payment intent for {amount} {currency}...")
+        print(f"[v2] Creating payment intent for {amount} {currency}...")
 
-    # Cấu trúc cơ bản
-    response = {
-        "id": "pi_modern_999",
-        "object": "payment_intent",
-        "amount": amount,
-        "currency": currency,
-        "client_secret": "secret_abc_123_xyz",
-        "created": 1732600000
-    }
-
-    # LOGIC ĐIỀU HƯỚNG TRẠNG THÁI (State Machine)
-    
-    # TRƯỜNG HỢP 1: Client chưa gửi thông tin thẻ/ví
-    if not payment_method:
-        response["status"] = "requires_payment_method"
-        # Không có link redirect vì chưa biết user dùng thẻ gì
-        # Client cần hiển thị form nhập thẻ ở bước này.
-    
-    # TRƯỜNG HỢP 2: Client đã gửi thẻ (Giả lập thẻ cần 3D Secure/OTP)
-    else:
-        response["status"] = "requires_action"
-        response["payment_method"] = payment_method
-        
-        # ĐÂY LÀ PHẦN BẠN CẦN: Link hướng dẫn bước tiếp theo
-        response["next_action"] = {
-            "type": "redirect_to_url",
-            "redirect_to_url": {
-                # Link giả lập trang nhập OTP của Ngân hàng
-                "url": "https://hooks.stripe.com/redirect/authenticate/src_123?client_secret=secret_abc",
-                # Link merchant muốn user quay về sau khi nhập OTP xong
-                "return_url": return_url 
-            }
+        response = {
+            "id": "pi_modern_999",
+            "object": "payment_intent",
+            "amount": amount,
+            "currency": currency,
+            "client_secret": "secret_abc_123_xyz",
+            "created": 1732600000
         }
 
-    return jsonify(response), 200
+        # TRƯỜNG HỢP 1: Client chưa gửi thông tin thẻ (Chưa cần gọi Bank)
+        if not payment_method:
+            response["status"] = "requires_payment_method"
+            # Không làm gì thêm, return ngay
+        
+        # TRƯỜNG HỢP 2: Client đã gửi thẻ -> GỌI NGÂN HÀNG
+        else:
+            # --- CIRCUIT BREAKER PROTECTED CALL ---
+            # Gọi service này sẽ kích hoạt Cầu dao nếu ngân hàng lỗi
+            # Nếu cầu dao đang MỞ, dòng này sẽ raise lỗi CircuitBreakerError ngay lập tức
+            bank_result = bank_service.charge_card(amount)
+
+            response["status"] = "requires_action"
+            response["payment_method"] = payment_method
+            response["bank_transaction_id"] = bank_result.get("transaction_id") # Kèm ID từ ngân hàng
+
+            response["next_action"] = {
+                "type": "redirect_to_url",
+                "redirect_to_url": {
+                    "url": "https://hooks.stripe.com/redirect/authenticate/src_123?client_secret=secret_abc",
+                    "return_url": return_url 
+                }
+            }
+
+        return jsonify(response), 200
+
+    # --- XỬ LÝ LỖI CIRCUIT BREAKER (FAIL FAST) ---
+    # Khi cầu dao MỞ, code sẽ nhảy thẳng vào đây, không cần chờ timeout
+    except pybreaker.CircuitBreakerError:
+        return jsonify({
+            "error": "service_unavailable",
+            "message": "Hệ thống Ngân hàng đang quá tải (Circuit Breaker OPEN). Vui lòng thử lại sau.",
+            "code": "circuit_open"
+        }), 503
+
+    except Exception as e:
+        return jsonify({
+            "error": "bank_error",
+            "message": str(e)
+        }), 502

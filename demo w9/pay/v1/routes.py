@@ -1,7 +1,6 @@
-# v1/routes.py
 from flask import Blueprint, jsonify, request
 from middleware.lifecycle import apply_lifecycle_manager
-from config import Config  # <--- BƯỚC 1: Import Config để lấy trạng thái
+from config import Config
 
 v1_bp = Blueprint('v1', __name__, url_prefix='/v1')
 

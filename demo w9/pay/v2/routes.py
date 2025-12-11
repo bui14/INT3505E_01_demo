@@ -1,15 +1,14 @@
 from flask import Blueprint, jsonify, request
 import pybreaker
-from extensions import limiter  # 1. Import Limiter
-from services.bank_service import bank_service # 2. Import Service có Circuit Breaker
+from extensions import limiter
+from services.bank_service import bank_service
 
 v2_bp = Blueprint('v2', __name__, url_prefix='/v2')
 
 @v2_bp.route('/payment-intents', methods=['POST'])
 # --- RATE LIMITING: Demo Window Time (3 request / 10 giây) ---
 @limiter.limit("3 per 10 seconds") 
-def create_payment_intent():
-    # Bọc toàn bộ logic vào try/except để bắt lỗi Circuit Breaker
+def create_payment_intent():    
     try:
         data = request.get_json() or {}
         amount = data.get('amount')

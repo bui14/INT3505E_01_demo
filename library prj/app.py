@@ -12,23 +12,30 @@ app = Flask(__name__)
 # Thiết lập khóa bảo mật
 app.config['SECRET_KEY'] = 'super_secret_key_for_library_api'
 
-# --- Kết nối MongoDB khi khởi động ---
-db = get_db()
-if db is not None:
-    print(f"✅ Đã kết nối MongoDB, Flask đang sử dụng database: {db.name}")
-    print(f"✅ Collections hiện có: {db.list_collection_names()}")
-else:
-    print("❌ Không thể kết nối MongoDB!")
+try:
+    from routes_v1 import v1_bp, limiter
+except ImportError as e:
+    print(f"❌ Lỗi Import: {e}. Kiểm tra lại tên file routes_v1.py hoặc biến limiter.")
+    exit(1)
 
-# --- Import các route sau khi DB sẵn sàng ---
-from routes_v1 import v1_bp  # Đảm bảo routes có thể gọi get_db()
+limiter.init_app(app)
 
-# --- Đăng ký API Blueprint ---
+# Đăng ký Blueprint
 app.register_blueprint(v1_bp)
 
-# --- Tích hợp Swagger UI ---
+with app.app_context():
+    db = get_db()
+    if db is not None:
+        try:
+            print(f"✅ Đã kết nối MongoDB. Database: {db.name}")
+            # print(f"Collections: {db.list_collection_names()}") # Uncomment nếu muốn xem collections
+        except Exception as e:
+            print(f"⚠️ Kết nối được nhưng gặp lỗi khi truy vấn: {e}")
+    else:
+        print("❌ Cảnh báo: Không thể kết nối MongoDB!")
+
 SWAGGER_URL = '/api/docs'
-API_URL = '/static/openapi.yaml'  # Điểm tới file YAML mô tả API
+API_URL = '/static/openapi.yaml'
 
 swaggerui_blueprint = get_swaggerui_blueprint(
     SWAGGER_URL,
@@ -40,26 +47,24 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 )
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 
-# --- Đóng kết nối khi Flask tắt ---
 @app.teardown_appcontext
 def shutdown_session(exception=None):
     close_mongo_connection()
 
-# --- Main ---
 if __name__ == '__main__':
-    # Đảm bảo thư mục static tồn tại
     if not os.path.exists('static'):
         os.makedirs('static')
 
-    # Tạo file openapi.yaml nếu chưa có
     if not os.path.exists('static/openapi.yaml'):
         with open('static/openapi.yaml', 'w') as f:
-            f.write("openapi: 3.0.0\ninfo:\n  title: Placeholder API\n  version: 1.0.0\npaths: {}")
-        print("⚠️  File 'static/openapi.yaml' chưa tồn tại. Đã tạo file placeholder.")
+            f.write("openapi: 3.0.0\ninfo:\n  title: Library API\n  version: 1.0.0\npaths: {}")
+        print("⚠️ File 'static/openapi.yaml' đã được tạo mới.")
 
     print("-" * 50)
     print("🚀 Ứng dụng Flask đang khởi động...")
-    print("📘 API V1: http://127.0.0.1:5000/api/v1/...")
-    print("📗 Swagger UI: http://127.0.0.1:5000/api/docs")
+    print(f"🔹 Rate Limiter: Enabled (Storage: Memory)")
+    print("📘 API V1 Root: http://127.0.0.1:5000/api/v1/books")
+    print("📗 Swagger UI:  http://127.0.0.1:5000/api/docs")
     print("-" * 50)
+    
     app.run(debug=True)

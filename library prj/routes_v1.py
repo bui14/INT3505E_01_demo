@@ -2,14 +2,25 @@ from flask import request, jsonify, make_response, Blueprint, current_app
 from flask_restful import Api, Resource
 from datetime import datetime, timedelta, timezone
 import jwt
-import functools 
-from bson import ObjectId 
-from pydantic_core import ValidationError 
-from db_mongo import get_db, UserSchema, BookSchema, ReviewSchema 
+import functools
+from bson import ObjectId
+from pydantic_core import ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+import pybreaker
+from db_mongo import get_db, UserSchema, BookSchema, ReviewSchema
 
 v1_bp = Blueprint('api_v1', __name__, url_prefix='/api/v1')
 api_v1 = Api(v1_bp) # Attach Flask-RESTful Api to the Blueprint
+
+limiter = Limiter(key_func=get_remote_address)
+
+db_breaker = pybreaker.CircuitBreaker(
+    fail_max=5, 
+    reset_timeout=60,
+    listeners=[pybreaker.CircuitBreakerListener()] # Có thể thêm log listener
+)
 
 # --- DECORATORS (using current_app for config) ---
 def jwt_required(f):
@@ -35,115 +46,183 @@ def admin_required(f):
         return f(*args, **kwargs)
     return wrapper
 
+def safe_db_query(callback, *args, **kwargs):
+    try:
+        # Bao bọc lệnh gọi DB bằng breaker
+        return db_breaker.call(callback, *args, **kwargs)
+    except pybreaker.CircuitBreakerError:
+        # Khi circuit đang mở (Open State)
+        current_app.logger.error("Circuit Breaker OPEN: Database is unresponsive.")
+        return None, {"message": "Hệ thống đang quá tải, vui lòng thử lại sau.", "status": 503}
+    except Exception as e:
+        current_app.logger.error(f"Database Error: {e}")
+        return None, {"message": "Lỗi kết nối cơ sở dữ liệu.", "status": 500}
+    
 # --- RESOURCES ---
 
 class LoginV1(Resource):
+    decorators = [limiter.limit("5 per minute", error_message="Quá nhiều lần thử đăng nhập. Vui lòng đợi.")]
+
     def post(self):
-        db = get_db()
-        if db is None: return {"message": "Database connection failed."}, 500
+        # Định nghĩa hàm logic DB để ném vào breaker
+        def query_user():
+            db = get_db()
+            if db is None: raise Exception("No DB Connection")
+            return db.users.find_one({"username": request.get_json().get('username')})
+
+        # Thực thi qua Circuit Breaker
+        user_doc, error = safe_db_query(query_user)
+        if error: return {"message": error['message']}, error['status']
         
         data = request.get_json()
-        username = data.get('username')
         password = data.get('password')
 
-        if not username or not password:
-             return {"message": "Thiếu username hoặc password."}, 400
-
-        user_doc = db.users.find_one({"username": username})
-        
-        # Kiểm tra user tồn tại và mật khẩu (đã hash)
         if user_doc and check_password_hash(user_doc.get('password', ''), password):
             payload = {
-                'username': username, 
+                'username': user_doc.get('username'),
                 'role': user_doc.get('role'),
-                'exp': datetime.now(timezone.utc) + timedelta(minutes=30), # Use timezone aware datetime
+                'exp': datetime.now(timezone.utc) + timedelta(minutes=30),
                 'iat': datetime.now(timezone.utc)
             }
-            token = jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm="HS256") 
+            token = jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm="HS256")
             return { "message": "Đăng nhập thành công", "token": token, "token_type": "Bearer"}, 200
 
         return {"message": "Sai tên đăng nhập hoặc mật khẩu."}, 401
-
+    
 class BookListV1(Resource):
+    decorators = [limiter.limit("60 per minute")]
+
     def get(self):
-        db = get_db()
-        if db is None: return {"message": "Database connection failed."}, 500
-        
         try:
             offset = int(request.args.get('offset', 0))
             limit = int(request.args.get('limit', 10))
-            search_query = request.args.get('q', '').strip() # Strip whitespace
-        except ValueError: return {"message": "Offset và Limit phải là số nguyên."}, 400
-        if limit < 1 or limit > 100: return {"message": "Limit phải nằm trong khoảng 1 đến 100."}, 400
+            search_query = request.args.get('q', '').strip()
+        except ValueError:
+            return {"message": "Offset và Limit phải là số nguyên."}, 400
+        if limit < 1 or limit > 100:
+            return {"message": "Limit phải nằm trong khoảng 1 đến 100."}, 400
 
-        # --- MongoDB Query ---
-        query_filter = {}
-        if search_query:
-            # Tìm kiếm không phân biệt hoa thường ($regex, $options: 'i')
-            regex = {"$regex": search_query, "$options": "i"}
-            query_filter["$or"] = [
-                {"title": regex},
-                {"author": regex}
-            ]
+        def execute_db_query():
+            db = get_db()
+            if db is None:
+                raise Exception("Database connection failed")
+
+            query_filter = {}
+            if search_query:
+                regex = {"$regex": search_query, "$options": "i"}
+                query_filter["$or"] = [
+                    {"title": regex},
+                    {"author": regex}
+                ]
             
-        total_count = db.books.count_documents(query_filter)
-        books_cursor = db.books.find(query_filter).sort("_id", 1).skip(offset).limit(limit)
-        paged_books_list = list(books_cursor)
+            total = db.books.count_documents(query_filter)
+            cursor = db.books.find(query_filter).sort("_id", 1).skip(offset).limit(limit)
+            return list(cursor), total
 
-        # Chuyển đổi ObjectId thành str và chuẩn bị data
+        result, error = safe_db_query(execute_db_query)
+
+        if error:
+            return {"message": error['message']}, error['status']
+
+        paged_books_list, total_count = result
+
         data_response = []
         for book in paged_books_list:
-            book['_id'] = str(book['_id']) # Convert ObjectId to string
+            book['_id'] = str(book['_id'])
             data_response.append(book)
         
-        # --- Metadata & HATEOAS ---
-        metadata = {"total_count": total_count, "current_items": len(paged_books_list), "offset": offset, "limit": limit, "next_offset": offset + limit if offset + limit < total_count else None}
-        base_url = f"{request.url_root.rstrip('/')}{v1_bp.url_prefix}/books" 
+        metadata = {
+            "total_count": total_count, 
+            "current_items": len(paged_books_list), 
+            "offset": offset, 
+            "limit": limit, 
+            "next_offset": offset + limit if offset + limit < total_count else None
+        }
+        
+        base_url = f"{request.url_root.rstrip('/')}{v1_bp.url_prefix}/books"
         query_params_str = f"q={search_query}&" if search_query else ""
-        links = {"self": f"{base_url}?{query_params_str}offset={offset}&limit={limit}", "first": f"{base_url}?{query_params_str}offset=0&limit={limit}"}
+        
+        links = {
+            "self": f"{base_url}?{query_params_str}offset={offset}&limit={limit}", 
+            "first": f"{base_url}?{query_params_str}offset=0&limit={limit}"
+        }
+        
         last_offset = total_count - (total_count % limit or limit)
         links["last"] = f"{base_url}?{query_params_str}offset={last_offset if last_offset >= 0 else 0}&limit={limit}" if total_count > 0 else f"{base_url}?{query_params_str}offset=0&limit={limit}"
-        if metadata["next_offset"] is not None: links["next"] = f"{base_url}?{query_params_str}offset={metadata['next_offset']}&limit={limit}"
-        if offset > 0: links["prev"] = f"{base_url}?{query_params_str}offset={max(0, offset - limit)}&limit={limit}"
         
-        response_data = jsonify({"data": data_response, "pagination": metadata, "_links": links, "actions": {"create_book": {"method": "POST", "href": base_url, "schema_ref": "/api/docs#/components/schemas/BookInput"}}})
-        res = make_response(response_data); res.headers.set('Cache-Control', 'public, max-age=60'); return res
-
+        if metadata["next_offset"] is not None:
+            links["next"] = f"{base_url}?{query_params_str}offset={metadata['next_offset']}&limit={limit}"
+        if offset > 0:
+            links["prev"] = f"{base_url}?{query_params_str}offset={max(0, offset - limit)}&limit={limit}"
+        
+        response_data = jsonify({
+            "data": data_response, 
+            "pagination": metadata, 
+            "_links": links, 
+            "actions": {
+                "create_book": {
+                    "method": "POST", 
+                    "href": base_url, 
+                    "schema_ref": "/api/docs#/components/schemas/BookInput"
+                }
+            }
+        })
+        
+        res = make_response(response_data)
+        res.headers.set('Cache-Control', 'public, max-age=60')
+        return res
     @jwt_required
+    @limiter.limit("10 per hour") 
     def post(self):
-        db = get_db()
-        if db is None: return {"message": "Database connection failed."}, 500
-        
-        data = request.get_json();
-        if not data: return {"message": "Không có dữ liệu JSON trong body."}, 400
+        # 1. Lấy dữ liệu từ request
+        data = request.get_json()
+        if not data: 
+            return {"message": "Không có dữ liệu JSON trong body."}, 400
 
-        # Validate with Pydantic
+        # 2. Validate dữ liệu bằng Pydantic
         try:
             book_model = BookSchema(**data)
-            book_to_insert = book_model.model_dump(exclude={'id'}) # Exclude id for insertion
+            # Loại bỏ field 'id' vì MongoDB sẽ tự tạo _id mới
+            book_to_insert = book_model.model_dump(exclude={'id'}) 
         except ValidationError as e:
             return {"message": f"Dữ liệu sách không hợp lệ: {e}"}, 400
         except Exception as e:
-             return {"message": f"Lỗi xử lý dữ liệu sách: {e}"}, 400
+            return {"message": f"Lỗi xử lý dữ liệu sách: {e}"}, 400
 
-        # Insert into MongoDB
-        try:
-             insert_result = db.books.insert_one(book_to_insert)
-             new_book_id = insert_result.inserted_id
-        except Exception as e:
-             return {"message": f"Lỗi khi thêm sách vào database: {e}"}, 500
+        # 3. Định nghĩa logic DB để Circuit Breaker quản lý
+        def insert_book_logic():
+            db = get_db()
+            if db is None: raise Exception("Database connection failed")
+            return db.books.insert_one(book_to_insert)
 
-        book_url = f"{request.url_root.rstrip('/')}{v1_bp.url_prefix}/books/{new_book_id}"
-        # Prepare response data (convert ObjectId to str)
+        # 4. Thực thi qua Circuit Breaker (safe_db_query)
+        result_db, error = safe_db_query(insert_book_logic)
+        
+        # Nếu Circuit Breaker trả về lỗi (DB chết hoặc ngắt mạch)
+        if error: 
+            return {"message": error['message']}, error['status']
+
+        # 5. Xử lý kết quả thành công
+        new_book_id = result_db.inserted_id
+        
+        # Chuẩn bị dữ liệu trả về (gán ID vừa tạo vào object)
         book_to_insert['_id'] = new_book_id 
         response_book = BookSchema.model_validate(book_to_insert).model_dump(mode='json') 
 
+        # Tạo HATEOAS Links
+        book_url = f"{request.url_root.rstrip('/')}{v1_bp.url_prefix}/books/{new_book_id}"
+        
         return {
             "message": "Thêm sách thành công", 
-            "book_id": str(new_book_id), # Return ID as string
+            "book_id": str(new_book_id), 
             "book": response_book, 
-            "_links": { "self": book_url, "edit": book_url, "delete": book_url, "reviews": f"{request.url_root.rstrip('/')}{v1_bp.url_prefix}/books/{new_book_id}/reviews"}
-            }, 201
+            "_links": { 
+                "self": book_url, 
+                "edit": book_url, 
+                "delete": book_url, 
+                "reviews": f"{book_url}/reviews"
+            }
+        }, 201
 
 class BookV1(Resource):
     def get(self, book_id_str):
